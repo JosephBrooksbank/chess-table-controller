@@ -1,23 +1,24 @@
-use std::borrow::Borrow;
-use std::sync::{Arc, Mutex};
+use std::process;
+use std::sync::mpsc::TryRecvError;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use esp_idf_hal::gpio::{self, Output, OutputPin, Pin, PinDriver};
 use esp_idf_hal::io::Write;
-use esp_idf_hal::modem::{Modem, WifiModemPeripheral};
+use esp_idf_hal::modem::Modem;
 use esp_idf_hal::peripheral::{Peripheral, PeripheralRef};
-use esp_idf_hal::peripherals::{self, Peripherals};
-use esp_idf_svc::eventloop::{EspEventLoop, EspSystemEventLoop};
-use esp_idf_svc::http::server::{Configuration, EspHttpServer};
+use esp_idf_hal::peripherals::Peripherals;
+use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
-use esp_idf_svc::wifi::{self, AccessPointConfiguration, BlockingWifi, EspWifi};
+use esp_idf_svc::wifi::{self, BlockingWifi, EspWifi};
 use esp_idf_sys::EspError;
 use log::info;
 
 const SSID: &str = "generic network name";
 const PASSWORD: &str = "MirrorWindowWall";
-const CHANNEL: u8 = 11;
+
 // need lots of stack to parse json
 const STACK_SIZE: usize = 10240;
 
@@ -66,14 +67,11 @@ where
     }
 }
 
-fn create_server(peripherals: Peripherals) -> anyhow::Result<EspHttpServer<'static>> {
+fn create_server(modem: PeripheralRef<Modem>) -> anyhow::Result<EspHttpServer<'static>> {
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
-    let mut wifi = BlockingWifi::wrap(
-        EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs))?,
-        sys_loop,
-    )?;
+    let mut wifi = BlockingWifi::wrap(EspWifi::new(modem, sys_loop.clone(), Some(nvs))?, sys_loop)?;
 
     let wifi_configuration = wifi::Configuration::Client(wifi::ClientConfiguration {
         ssid: SSID.try_into().unwrap(),
@@ -86,7 +84,6 @@ fn create_server(peripherals: Peripherals) -> anyhow::Result<EspHttpServer<'stat
 
     wifi.set_configuration(&wifi_configuration)?;
     wifi.start()?;
-    info!("Wifi Started!");
     wifi.connect()?;
     info!("Wifi Connected!");
     wifi.wait_netif_up()?;
@@ -113,17 +110,21 @@ fn main() -> anyhow::Result<()> {
     esp_idf_svc::log::EspLogger::initialize_default();
     // take control of peripherals
     let peripherals = Peripherals::take()?;
-    let mut server = create_server(peripherals)?;
+    let mut server = create_server(peripherals.modem.into_ref())?;
 
-    server.fn_handler("/", esp_idf_svc::http::Method::Get, |req| {
+    let (tx, rx) = mpsc::channel();
+
+    server.fn_handler("/", esp_idf_svc::http::Method::Get, move |req| {
+        println!("handling request");
+        tx.send(true).unwrap();
         req.into_ok_response()?.write_all("TEST".as_bytes())
     })?;
 
-    // let mut stepper = StepperMotor::new(peripherals.pins.gpio27, peripherals.pins.gpio14);
-    // stepper.set_direction(StepperDirection::Clockwise)?;
-    // let mut led = PinDriver::output(peripherals.pins.gpio2)?;
-    // let mut button = PinDriver::input(peripherals.pins.gpio26)?;
-    // button.set_pull(gpio::Pull::Down)?;
+    let mut stepper = StepperMotor::new(peripherals.pins.gpio27, peripherals.pins.gpio14);
+    stepper.set_direction(StepperDirection::Clockwise)?;
+    let mut led = PinDriver::output(peripherals.pins.gpio2)?;
+    let mut button = PinDriver::input(peripherals.pins.gpio26)?;
+    button.set_pull(gpio::Pull::Down)?;
 
     let m = Arc::new(Mutex::new(true));
 
@@ -134,25 +135,43 @@ fn main() -> anyhow::Result<()> {
             let mutex_ref = m2.lock().unwrap();
             on = *mutex_ref;
         }
-        // led.set_level(match on {
-        //     true => gpio::Level::High,
-        //     false => gpio::Level::Low,
-        // })
-        // .unwrap();
+        led.set_level(match on {
+            true => gpio::Level::High,
+            false => gpio::Level::Low,
+        })
+        .unwrap();
 
         thread::sleep(Duration::from_millis(10));
     });
 
     loop {
-        // if button.is_high() {
-        //     let mut mutex_ref = m.lock().unwrap();
-        //     *mutex_ref = true;
-        //     println!("Sending Pulse to Stepper!");
-        // } else {
-        //     let mut mutex_ref = m.lock().unwrap();
-        //     *mutex_ref = false;
-        // }
+        match rx.try_recv() {
+            // Ok(val) => flash_light(&mut led),
+            Ok(val) => {
+                {
+                    println!("setting on in mutex");
+                    let mut m = m.lock().unwrap();
+                    *m = val;
+                }
+                thread::sleep(Duration::from_millis(500));
+                let mut m = m.lock().unwrap();
+                println!("setting off in mutex");
+                *m = false;
+            }
+            Err(e) => {
+                if let TryRecvError::Disconnected = e {
+                    info!("tx Disconnected!");
+                    process::exit(1);
+                }
+            }
+        };
 
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn flash_light<'d, T: Pin>(led: &mut PinDriver<'d, T, gpio::Output>) {
+    led.set_high().unwrap();
+    thread::sleep(Duration::from_millis(500));
+    led.set_low().unwrap();
 }
