@@ -1,27 +1,28 @@
-use std::time::Duration;
-
+use esp_idf_hal::delay::Ets;
 use esp_idf_hal::gpio::{Output, OutputPin, Pin, PinDriver};
 use esp_idf_hal::peripheral::Peripheral;
 use esp_idf_sys::EspError;
+use serde::Deserialize;
 
-enum StepperDirection {
+#[derive(Deserialize)]
+pub enum StepperDirection {
     Clockwise,
     Counterclockwise,
 }
 
 pub struct StepperMotor<'d, PinA, PinB>
-    where
-        PinA: Pin,
-        PinB: Pin,
+where
+    PinA: Pin,
+    PinB: Pin,
 {
     step: PinDriver<'d, PinA, Output>,
     dir: PinDriver<'d, PinB, Output>,
 }
 
 impl<'d, PinA, PinB> StepperMotor<'d, PinA, PinB>
-    where
-        PinA: OutputPin,
-        PinB: OutputPin,
+where
+    PinA: OutputPin,
+    PinB: OutputPin,
 {
     pub fn new(
         stepper_pin: impl Peripheral<P = PinA> + 'd,
@@ -35,11 +36,11 @@ impl<'d, PinA, PinB> StepperMotor<'d, PinA, PinB>
         stepper
     }
 
-    pub fn step(&mut self) -> anyhow::Result<(), EspError> {
+    pub fn step(&mut self, pulse_width: u32) -> anyhow::Result<(), EspError> {
         self.step.set_high()?;
-        std::thread::sleep(Duration::from_millis(5));
+        Ets::delay_us(pulse_width);
         self.step.set_low()?;
-        std::thread::sleep(Duration::from_millis(5));
+        Ets::delay_us(pulse_width);
         Ok(())
     }
 
@@ -49,5 +50,12 @@ impl<'d, PinA, PinB> StepperMotor<'d, PinA, PinB>
             StepperDirection::Clockwise => self.dir.set_high(),
             StepperDirection::Counterclockwise => self.dir.set_low(),
         }
+    }
+
+    pub fn drive(&mut self, steps: u32, pulse_width: u32) -> anyhow::Result<(), EspError> {
+        for _ in 0..steps {
+            self.step(pulse_width)?;
+        }
+        Ok(())
     }
 }
