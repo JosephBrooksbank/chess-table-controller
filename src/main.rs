@@ -4,6 +4,8 @@ use std::sync::mpsc::{Sender, TryRecvError};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use esp_idf_hal::task::block_on;
+use esp_idf_hal::timer::{TimerConfig, TimerDriver};
 
 use ctc::{config, stepper_web_control, stepper_web_control::StepperControl, web};
 
@@ -26,13 +28,21 @@ fn main() -> anyhow::Result<()> {
 
     let pins = PinDefinitions::build(peripherals.pins);
 
-    let mut stepper = stepper::StepperMotor::new(pins.stepper, pins.stepper_dir);
+    let mut stepper = stepper::StepperMotor::new(
+        pins.stepper,
+        pins.stepper_dir,
+        peripherals.timer00.into_ref(),
+        peripherals.timer01.into_ref()
+    );
     let mut led = Led::new(pins.onboard_led);
     let mut button = Button::new(pins.button.downgrade());
+    let mut timer_config = TimerConfig::new();
+    timer_config.divider = 10;
+    timer_config.auto_reload = true;
 
     loop {
         match rx.try_recv() {
-            Ok(val) => {
+            Ok(val) => unsafe {
                 led.turn_on();
                 stepper.drive(val.steps, val.pulse_width)?;
                 led.turn_off();
