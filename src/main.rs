@@ -44,7 +44,7 @@ fn main() -> anyhow::Result<()> {
         match rx.try_recv() {
             Ok(val) => unsafe {
                 led.turn_on();
-                stepper.drive(val.steps, val.pulse_width)?;
+                stepper.drive(val.steps, val.pulse_width, val.accel, val.max_sps)?;
                 led.turn_off();
             }
             Err(e) => {
