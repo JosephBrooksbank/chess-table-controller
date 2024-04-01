@@ -7,7 +7,6 @@ use esp_idf_hal::peripheral::Peripheral;
 use esp_idf_hal::task::notification::Notification;
 use esp_idf_hal::timer::{Timer, TimerConfig, TimerDriver};
 use esp_idf_sys::EspError;
-use log::info;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -101,11 +100,11 @@ impl<PinA, PinB, TIMER00, TIMER01> StepperMotor<PinA, PinB, TIMER00, TIMER01>
         (sps_timer, accel_timer)
     }
 
-    pub unsafe fn drive(&mut self, steps: u32, pulse_width: u32, accel: u64, max_sps: u64) -> anyhow::Result<(), EspError> {
+    pub unsafe fn drive(&mut self, steps: u32, pulse_width: u32, accel: u64, max_sps: u64, min_sps: u64) -> anyhow::Result<(), EspError> {
         let sps_timer = self.sps_timer.clone_unchecked();
         let accel_timer = self.accel_timer.clone_unchecked();
         let (mut sps_timer, mut accel_timer) = Self::setup_timers(sps_timer, accel_timer);
-        let mut current_sps = 1;
+        let mut current_sps = min_sps;
         let mut current_step = 0;
         
         let stop_accel = (steps as f64 * Self::ACCEL_PERCENT).floor() as u32;
@@ -146,16 +145,19 @@ impl<PinA, PinB, TIMER00, TIMER01> StepperMotor<PinA, PinB, TIMER00, TIMER01>
                         1 => {
                             self.step(pulse_width)?;
                             current_step += 1;
-                            info!("current step: {}", current_step);
                             if current_step >= steps {
+                                sps_timer.enable(false).unwrap();
+                                accel_timer.enable(false).unwrap();
                                 break;
                             }
                             
                             if current_step == stop_accel {
                                 stepper_state = StepperState::Constant;
+                                accel_timer.enable_alarm(false).unwrap();
                             }
-                            if current_step >= start_decel {
+                            if current_step == start_decel {
                                 stepper_state = StepperState::Decelerating;
+                                accel_timer.enable_alarm(true).unwrap();
                             }
                         }
                         2 => {
@@ -164,6 +166,7 @@ impl<PinA, PinB, TIMER00, TIMER01> StepperMotor<PinA, PinB, TIMER00, TIMER01>
                                     current_sps += 1;
                                     if current_sps >= max_sps {
                                         stepper_state = StepperState::Constant;
+                                        accel_timer.enable_alarm(false).unwrap();
                                         current_sps = max_sps;
                                         start_decel = steps - current_step;
                                     }
@@ -171,13 +174,13 @@ impl<PinA, PinB, TIMER00, TIMER01> StepperMotor<PinA, PinB, TIMER00, TIMER01>
                                 StepperState::Constant => {continue;}
                                 StepperState::Decelerating => {
                                     current_sps -= 1;
-                                    if current_sps == 0 {
-                                        current_sps = 1;
+                                    if current_sps <= min_sps {
+                                        stepper_state = StepperState::Constant;
+                                        accel_timer.enable_alarm(false).unwrap();
+                                        
                                     }
-                                    stepper_state = StepperState::Constant;
                                 }
                             }
-                            info!("current sps: {}", current_sps);
                             let sps_timer_register = timer_hz / current_sps;
                             sps_timer.set_alarm(sps_timer_register).unwrap();
                         }

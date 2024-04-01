@@ -12,6 +12,7 @@ pub struct StepperControl {
     pub pulse_width: u32,
     pub accel: u64,
     pub max_sps: u64,
+    pub min_sps: u64,
 }
 
 pub fn add_stepper_web_control(
