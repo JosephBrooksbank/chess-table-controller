@@ -23,6 +23,7 @@ enum StepperState {
     Accelerating,
     Constant,
     Decelerating,
+    CurrentStep(u32),
 }
 
 pub struct StepperMotor< PinA, PinB>
@@ -95,7 +96,7 @@ where
         let notification = Notification::new();
         let notifier = notification.notifier();
         let stop_accel = (steps as f64 *Self::ACCEL_PERCENT).floor() as u32;
-        let start_decel = steps - stop_accel;
+        let mut start_decel = steps - stop_accel;
         
         // initial set up of timer in lower scope so the lock is released
         {
@@ -116,7 +117,8 @@ where
         
         let sps_timer_ref = self.sps_timer.clone();
         let accel_timer_ref = self.accel_timer.clone();
-        let (tx, rx) = mpsc::channel();
+        let (stepper_state_tx, stepper_state_rx) = mpsc::channel();
+        let (decel_tx, decel_rx) = mpsc::channel();
         
         
         
@@ -138,9 +140,10 @@ where
             accel_timer.enable_interrupt().unwrap();
             accel_timer.enable(true).unwrap();
             let mut stepper_state = StepperState::Accelerating;
+            let mut current_step = 0;
             loop {
                 if stepper_state == StepperState::Constant {
-                    match rx.recv() {
+                    match stepper_state_rx.recv() {
                         Ok(val) => {
                             match val {
                                 StepperState::Accelerating => {
@@ -153,6 +156,9 @@ where
                                 }
                                 StepperState::Constant => {
                                     continue;
+                                },
+                                StepperState::CurrentStep(step) => {
+                                    current_step = step;
                                 }
                             }
                         },
@@ -161,9 +167,16 @@ where
                         }
                     }
                 }
-                match rx.try_recv() {
+                match stepper_state_rx.try_recv() {
                     Ok(val) => {
-                        stepper_state = val;
+                        match val {
+                            StepperState::CurrentStep(step) => {
+                                current_step = step;
+                            }
+                            _ => {
+                                stepper_state = val;
+                            }
+                        }
                     }
                     Err(e) => {
                         if let mpsc::TryRecvError::Disconnected = e {
@@ -180,9 +193,15 @@ where
                             continue;
                         },
                         StepperState::Decelerating => sps -= 1,
+                        StepperState::CurrentStep(step) => {
+                            current_step = step;
+                        }
                     }
                     if sps > max_sps {
+                        info!("setting the point to decelerate to {}", steps - current_step);
+                        decel_tx.send(current_step).unwrap();
                         sps = max_sps; 
+                        stepper_state = StepperState::Constant;
                     }
                     if sps == 0 {
                         sps = 1;
@@ -199,6 +218,18 @@ where
             if counter == steps {
                 break;
             }
+            match decel_rx.try_recv() {
+                Ok(step) => {
+                    info!("setting the point to decelerate to {}", steps - step);
+                    // start_decel = steps - step;
+                }
+                Err(e) => {
+                    if let mpsc::TryRecvError::Disconnected = e {
+                        break;
+                    }
+                }
+            }
+                
             let bitset = notification.wait(esp_idf_hal::delay::BLOCK);
             if let Some(bitset) = bitset {
                 self.step(pulse_width)?;
@@ -206,11 +237,13 @@ where
                 println!("on step: {}", counter);
                 if counter == stop_accel {
                     println!("stop accel");
-                    tx.send(StepperState::Constant).unwrap();
+                    stepper_state_tx.send(StepperState::Constant).unwrap();
                 }
-                if counter == start_decel {
+                else if counter == start_decel {
                     println!("start decel");
-                    tx.send(StepperState::Decelerating).unwrap();
+                    stepper_state_tx.send(StepperState::Decelerating).unwrap();
+                } else {
+                    stepper_state_tx.send(StepperState::CurrentStep(counter)).unwrap();
                 }
             }
         }
